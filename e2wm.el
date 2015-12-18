@@ -1560,6 +1560,7 @@ management. For window-layout.el.")
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; winhistory っぽいもの実装
+(require 'ring)
 (defvar e2wm-winhistory:enable nil) ;これをtにセットすると動作する
 (defvar e2wm-winhistory:ring-size 100)
 (defvar e2wm-winhistory:frame<->ring&index-alist nil)

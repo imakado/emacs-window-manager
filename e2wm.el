@@ -775,9 +775,14 @@ See `e2wm:method-call' for implementation."
 (defun e2wm:$pst-update (pst)
   (e2wm:$pst-class-update (e2wm:$pst-type pst)))
 (defun e2wm:$pst-switch (pst)
-  (e2wm:$pst-class-switch (e2wm:$pst-type pst)))
+  ;; winhistory
+  ;; 返り値を使うため prog1
+  (prog1 (e2wm:$pst-class-switch (e2wm:$pst-type pst))
+    (run-hooks 'e2wm:window-change-hook)))
 (defun e2wm:$pst-popup (pst)
-  (e2wm:$pst-class-popup (e2wm:$pst-type pst)))
+  ;; 返り値を使うため prog1
+  (prog1 (e2wm:$pst-class-popup (e2wm:$pst-type pst))
+    (run-hooks 'e2wm:window-change-hook)))
 (defun e2wm:$pst-leave (pst)
   (e2wm:$pst-class-leave (e2wm:$pst-type pst)))
 (defun e2wm:$pst-save (pst)
@@ -832,6 +837,9 @@ are created."
      ;; Update task for the current perspective
      ;; (Plug-ins are updated by `e2wm:dp-base-update')
      (e2wm:pst-method-call e2wm:$pst-class-update instance wm)
+
+     ;; winhistory
+    (run-hooks 'e2wm:window-change-hook)
      )) t)
 
 (defun e2wm:pst-switch-to-buffer (buf)
@@ -1546,6 +1554,129 @@ management. For window-layout.el.")
     ad-do-it))
   ;;(e2wm:message "#SET-WINDOW-CONFIGURATION <-- %s" ad-return-value)
   )
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; winhistory っぽいもの実装
+(defvar e2wm-winhistory:enable nil) ;これをtにセットすると動作する
+(defvar e2wm-winhistory:ring-size 100)
+(defvar e2wm-winhistory:frame<->ring&index-alist nil)
+
+;; windowの状態の変更を知るためにhookを追加
+;; 各関数に修正を加えて実装したが defadvice afterのほうが良いか迷っている
+;; e2wm:$pst-switch
+;; e2wm:$pst-popup
+;; e2wm:pst-update-windows
+;; でrun-hooksされる
+;; 各関数の返り値は重要だと思われたのでかえないようにしてる
+(defvar e2wm:window-change-hook nil)
+
+
+(defun e2wm-winhistory:window-change-hook-func ()
+  (e2wm-winhistory:save-window-configuration)
+  )
+(add-hook 'e2wm:window-change-hook
+          'e2wm-winhistory:window-change-hook-func)
+
+(defun e2wm-winhistory:should-save-window-configuration-p ()
+  (and e2wm-winhistory:enable
+       (e2wm:managed-p) ; e2wmつかっているとき
+       (= (minibuffer-depth) 0) ; ミニバッファ実行中でない
+       ))
+
+(defun e2wm-winhistory:save-window-configuration ()
+  (interactive)
+  (when (e2wm-winhistory:should-save-window-configuration-p)
+    (let* ((ring&index-list
+            (e2wm:aand (selected-frame)
+                       (assq it e2wm-winhistory:frame<->ring&index-alist)
+                       (cdr it)))
+           (new-$wcfg (make-e2wm:$wcfg :wcfg (current-window-configuration)
+                                       :pst (e2wm:pst-copy-instance)
+                                       ;; TODO ここ本来の値じゃないから incf しないでセットしてる。
+                                       ;; これで問題ない？
+                                       :count e2wm:override-window-cfg-count))
+           (previous-$wcfg (e2wm-winhistory:get-previous-$wcfg))
+           (changed? (or (not previous-$wcfg) ;一個もなければ保存
+                         (e2wm-winhistory:$wcfg-changed-p new-$wcfg previous-$wcfg))))
+      (unless new-$wcfg
+        (error "new-$wcfg is nil %s" new-$wcfg))
+      (when changed?
+        (cond
+         (ring&index-list
+          (cl-destructuring-bind (ring . index) ring&index-list
+            (ring-insert ring new-$wcfg)
+            (setcdr ring&index-list 0)))
+         (t
+          (let* ((new-ring (make-ring e2wm-winhistory:ring-size))
+                 (newalist `(,new-ring . 0)))
+            (ring-insert new-ring new-$wcfg)
+            (setq e2wm-winhistory:frame<->ring&index-alist 
+                  (cons `(,(selected-frame) . ,newalist)
+                        e2wm-winhistory:frame<->ring&index-alist
+                        ))))))
+      )))
+
+;; returns $wcfg or nil
+(defun e2wm-winhistory:get-previous-$wcfg ()
+  (e2wm:aand (selected-frame)
+             (assq it e2wm-winhistory:frame<->ring&index-alist)
+             (cl-destructuring-bind (ring . index) (cdr it)
+               (and (not (ring-empty-p ring))
+                    (ring-ref ring 0)))))
+  
+(defun e2wm-winhistory:$wcfg-changed-p ($wcfg1 $wcfg2)
+  ;; TODO: 暫定的に現在の$wcfgと一個前の$wcfgを再帰的にequalで比較して違いがあったら保存対象としてる
+  (not (cl-tree-equal new-$wcfg previous-$wcfg :test 'equal)))
+
+
+
+(defun e2wm-winhistory:backward (&optional n)
+  (interactive "p")
+  (let ((ring&index-list
+         (e2wm:aand (selected-frame)
+                    (assq it e2wm-winhistory:frame<->ring&index-alist)
+                    (cdr it))))
+    (unless ring&index-list
+      (error "No history for this frame."))
+    (cl-destructuring-bind (ring . index) ring&index-list
+      (let* ((new-index (+ n index))
+             ($wcfg (ring-ref ring new-index)))
+        ;; 現在表示しているindexを記憶
+        (setcdr ring&index-list new-index)
+        (when $wcfg
+          (when e2wm:pst-minor-mode
+            (cond
+             ((e2wm:managed-p)
+
+              ;; リストア処理
+              ;; TODO: ちょっと調べきれてないので不十分かも
+              ;; 再帰的に実行されないように e2wm:window-change-hook を一時的にnilにした状態で実行する
+              (let ((e2wm:window-change-hook nil))
+                (e2wm:pst-set-instance (e2wm:$wcfg-pst $wcfg))
+                (e2wm:pst-resume (e2wm:$wcfg-pst $wcfg))
+                (wlf:refresh (e2wm:$pst-wm (e2wm:$wcfg-pst $wcfg)))
+                ;; focusをもどす
+                (let ((i (e2wm:pst-get-instance)))
+                  (e2wm:aif (or (e2wm:$pst-focus i)
+                                (e2wm:$pst-main i))
+                      (wlf:select (e2wm:$pst-wm i) it)))
+                ;; plugin update
+                (e2wm:pst-update-windows))
+              
+              (message "e2wm window history [%s]" new-index)
+              )
+             (t
+              (error "This frame is not managed")))))))))
+
+(defun e2wm-winhistory:forward (&optional n)
+  ""
+  (interactive "p")
+  (e2wm-winhistory:backward (- n)))
+
+
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

@@ -1629,7 +1629,7 @@ management. For window-layout.el.")
   
 (defun e2wm-winhistory:$wcfg-changed-p ($wcfg1 $wcfg2)
   ;; TODO: 暫定的に現在の$wcfgと一個前の$wcfgを再帰的にequalで比較して違いがあったら保存対象としてる
-  (not (cl-tree-equal new-$wcfg previous-$wcfg :test 'equal)))
+  (not (cl-tree-equal $wcfg1 $wcfg2 :test 'equal)))
 
 
 
